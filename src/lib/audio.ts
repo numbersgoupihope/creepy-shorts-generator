@@ -217,9 +217,16 @@ class AudioEngine {
    * cutoff synced to the clip's cut to black. No copyrighted recording or
    * modern melody is used anywhere here. */
   playHomeVideoAudio() {
-    const ctx = this.ensureContext();
-    const duration = 4.4;
-    const now = ctx.currentTime;
+    this.playMelodyLayer(this.ensureContext(), this.ensureContext().currentTime, 4.4);
+  }
+
+  /** Shared melody/tone layer — same reversed, tape-slowing phrase as
+   * playHomeVideoAudio() above, stretched to fit an arbitrary duration so
+   * it can underlie a generated clip of any length. Kept separate from
+   * the pitch-shift-down drone in playGeneratedClip(): this is "whatever
+   * melody/tone plays", the drone is a distinct always-present layer on
+   * top of it. */
+  private playMelodyLayer(ctx: AudioContext, now: number, duration: number) {
     const end = now + duration;
     const baseFreq = 261.63 / 2.5; // C4, pitched down roughly an octave and a half
 
@@ -275,6 +282,57 @@ class AudioEngine {
     // Hard cut — no fade, matching the clip's instant cut to black.
     masterEnv.gain.cancelScheduledValues(end);
     masterEnv.gain.setValueAtTime(0, end);
+  }
+
+  /** The full audio bed for one generated clip: the melody/tone layer
+   * above, plus a separate, always-present drone that continuously
+   * pitch-shifts downward from `droneStartHz` toward `droneEndHz` across
+   * the whole clip duration — sinking into felt-not-heard territory by
+   * the spike moment. Both layers share one hard cutoff at `durationMs`,
+   * synced to the clip's instant cut to black; returns a `stop()` you can
+   * call to force that cutoff early (e.g. if the clip is interrupted). */
+  playGeneratedClip({
+    durationMs,
+    droneStartHz,
+    droneEndHz,
+  }: {
+    durationMs: number;
+    droneStartHz: number;
+    droneEndHz: number;
+  }): () => void {
+    const ctx = this.ensureContext();
+    // Call from a real user gesture (the Generate button click) — this
+    // resumes a context browsers create suspended under autoplay policy.
+    if (ctx.state === "suspended") void ctx.resume();
+    const duration = durationMs / 1000;
+    const now = ctx.currentTime;
+    const end = now + duration;
+
+    this.playMelodyLayer(ctx, now, duration);
+
+    const droneGain = ctx.createGain();
+    droneGain.gain.setValueAtTime(0, now);
+    droneGain.gain.linearRampToValueAtTime(0.2, now + 0.6);
+    droneGain.connect(this.masterGain!);
+
+    const drone = ctx.createOscillator();
+    drone.type = "sine";
+    drone.frequency.setValueAtTime(droneStartHz, now);
+    drone.frequency.exponentialRampToValueAtTime(Math.max(1, droneEndHz), end);
+    drone.connect(droneGain);
+    drone.start(now);
+
+    // Hard cut — no fade, in sync with the clip's instant cut to black.
+    droneGain.gain.cancelScheduledValues(end);
+    droneGain.gain.setValueAtTime(0, end);
+    drone.stop(end + 0.05);
+
+    return () => {
+      const stopNow = ctx.currentTime;
+      droneGain.gain.cancelScheduledValues(stopNow);
+      droneGain.gain.setValueAtTime(0, stopNow);
+      drone.stop(stopNow + 0.02);
+    };
   }
 }
 
