@@ -22,6 +22,11 @@ class AudioEngine {
   private tension = 0;
   enabled = false;
 
+  // A <video> element can only ever get one MediaElementAudioSourceNode —
+  // cache it so Regenerate (a new play of the same element) reuses it
+  // instead of throwing on a second createMediaElementSource() call.
+  private videoSources = new WeakMap<HTMLVideoElement, MediaElementAudioSourceNode>();
+
   private ensureContext(): AudioContext {
     if (!this.ctx) {
       const Ctx =
@@ -329,6 +334,97 @@ class AudioEngine {
 
     return () => {
       const stopNow = ctx.currentTime;
+      droneGain.gain.cancelScheduledValues(stopNow);
+      droneGain.gain.setValueAtTime(0, stopNow);
+      drone.stop(stopNow + 0.02);
+    };
+  }
+
+  /** The audio bed for an uploaded-video clip: the video's own audio,
+   * routed through Web Audio so it can be shaped rather than played
+   * clean — a slow "approach" (rising volume, drifting pan) plus a
+   * slight pitch/time warp — underneath the same always-present
+   * pitch-shift-down drone used elsewhere. Both share one hard cutoff at
+   * `durationMs`, in sync with the visual cut; returns a `stop()` to
+   * force that cutoff early. Call once per <video> element per play —
+   * safe to call again on the same element (e.g. Regenerate). */
+  playVideoClip({
+    video,
+    durationMs,
+    droneStartHz,
+    droneEndHz,
+    warpRate,
+  }: {
+    video: HTMLVideoElement;
+    durationMs: number;
+    droneStartHz: number;
+    droneEndHz: number;
+    warpRate: number;
+  }): () => void {
+    const ctx = this.ensureContext();
+    if (ctx.state === "suspended") void ctx.resume();
+    const duration = durationMs / 1000;
+    const now = ctx.currentTime;
+    const end = now + duration;
+
+    let source = this.videoSources.get(video);
+    if (!source) {
+      source = ctx.createMediaElementSource(video);
+      this.videoSources.set(video, source);
+    } else {
+      source.disconnect();
+    }
+
+    // Slight pitch-down + slight time-stretch, linked for free: slowing
+    // playbackRate below 1 does both at once, as long as pitch
+    // correction is turned off.
+    video.playbackRate = warpRate;
+    type PitchPrefs = { preservesPitch?: boolean; mozPreservesPitch?: boolean; webkitPreservesPitch?: boolean };
+    const prefs = video as unknown as PitchPrefs;
+    prefs.preservesPitch = false;
+    prefs.mozPreservesPitch = false;
+    prefs.webkitPreservesPitch = false;
+
+    // The sound "approaching": rising volume and a slow stereo drift
+    // across the whole clip, instead of a flat constant level.
+    const videoGain = ctx.createGain();
+    videoGain.gain.setValueAtTime(0.4, now);
+    videoGain.gain.linearRampToValueAtTime(1, end);
+
+    const panner = ctx.createStereoPanner();
+    panner.pan.setValueAtTime(-0.25, now);
+    panner.pan.linearRampToValueAtTime(0.25, end);
+
+    source.connect(videoGain);
+    videoGain.connect(panner);
+    panner.connect(this.masterGain!);
+
+    // Hard cut — no fade, matching the visual cut to black.
+    videoGain.gain.cancelScheduledValues(end);
+    videoGain.gain.setValueAtTime(0, end);
+
+    // The same always-present pitch-shift-down drone as the procedural
+    // clip, running underneath the video's own (warped) audio.
+    const droneGain = ctx.createGain();
+    droneGain.gain.setValueAtTime(0, now);
+    droneGain.gain.linearRampToValueAtTime(0.2, now + 0.6);
+    droneGain.connect(this.masterGain!);
+
+    const drone = ctx.createOscillator();
+    drone.type = "sine";
+    drone.frequency.setValueAtTime(droneStartHz, now);
+    drone.frequency.exponentialRampToValueAtTime(Math.max(1, droneEndHz), end);
+    drone.connect(droneGain);
+    drone.start(now);
+
+    droneGain.gain.cancelScheduledValues(end);
+    droneGain.gain.setValueAtTime(0, end);
+    drone.stop(end + 0.05);
+
+    return () => {
+      const stopNow = ctx.currentTime;
+      videoGain.gain.cancelScheduledValues(stopNow);
+      videoGain.gain.setValueAtTime(0, stopNow);
       droneGain.gain.cancelScheduledValues(stopNow);
       droneGain.gain.setValueAtTime(0, stopNow);
       drone.stop(stopNow + 0.02);

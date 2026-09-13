@@ -1,0 +1,279 @@
+"use client";
+
+import { useEffect, useRef, useState } from "react";
+import { getAudioEngine } from "@/lib/audio";
+import { pickCreepyParams } from "@/lib/random";
+import NoiseCanvas from "@/components/NoiseCanvas";
+
+const MAX_CANVAS_W = 960;
+const LAG_SAMPLE_INTERVAL_MS = 120;
+const LAG_BUFFER_MAX_MS = 2200;
+
+interface BufferedFrame {
+  t: number;
+  canvas: HTMLCanvasElement;
+}
+
+export default function VideoStage({
+  videoUrl,
+  durationMs,
+  seed,
+  playToken,
+  onDone,
+}: {
+  videoUrl: string;
+  /** Requested clip length; clamped to the source video's own length. */
+  durationMs: number;
+  seed: number;
+  /** Increment to (re)start playback with a fresh seed. */
+  playToken: number;
+  onDone?: () => void;
+}) {
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const rafRef = useRef<number | null>(null);
+  const startRef = useRef(0);
+  const stopAudioRef = useRef<(() => void) | null>(null);
+  const bufferRef = useRef<BufferedFrame[]>([]);
+  const lastSampleRef = useRef(0);
+  const frozenRef = useRef(false);
+  const burstFiredRef = useRef({ anomaly: false, freeze: false });
+  const featherMaskRef = useRef<HTMLCanvasElement | null>(null);
+  const regionScratchRef = useRef<HTMLCanvasElement | null>(null);
+  const [dims, setDims] = useState({ w: 640, h: 360 });
+  const [staticBurst, setStaticBurst] = useState(false);
+  const [isPlaying, setIsPlaying] = useState(false);
+
+  useEffect(() => {
+    return () => {
+      if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
+      stopAudioRef.current?.();
+    };
+  }, []);
+
+  function handleLoadedMetadata() {
+    const video = videoRef.current;
+    if (!video) return;
+    const scale = Math.min(1, MAX_CANVAS_W / video.videoWidth);
+    setDims({ w: Math.round(video.videoWidth * scale), h: Math.round(video.videoHeight * scale) });
+  }
+
+  useEffect(() => {
+    if (playToken === 0) return;
+    startClip();
+    return () => {
+      if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
+      stopAudioRef.current?.();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [playToken]);
+
+  function startClip() {
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
+    if (!video || !canvas) return;
+    if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
+    stopAudioRef.current?.();
+
+    const params = pickCreepyParams(seed);
+    const videoDurationMs = Number.isFinite(video.duration) ? video.duration * 1000 : durationMs;
+    // Cut before the source would naturally end — leave a little slack for
+    // the freeze hold.
+    const clipDurationMs = Math.min(durationMs, Math.max(1000, videoDurationMs - 200));
+    const freezeStartMs = clipDurationMs - params.freezeHoldMs;
+    const anomalyStartMs = Math.min(params.anomalyStartFrac * clipDurationMs, freezeStartMs - 300);
+    const anomalyEndMs = Math.min(anomalyStartMs + params.anomalyDurMs, freezeStartMs - 50);
+
+    bufferRef.current = [];
+    lastSampleRef.current = -Infinity;
+    frozenRef.current = false;
+    burstFiredRef.current = { anomaly: false, freeze: false };
+    setIsPlaying(true);
+
+    // Pixel size of the anomaly region on this canvas, plus a soft radial
+    // feather mask sized to match — compositing the lagged patch through
+    // it avoids a hard rectangular seam, so it reads as the scene moving
+    // wrong rather than a visibly pasted overlay.
+    const regionPx = {
+      x: Math.round(params.anomalyRegion.x * canvas.width),
+      y: Math.round(params.anomalyRegion.y * canvas.height),
+      w: Math.round(params.anomalyRegion.w * canvas.width),
+      h: Math.round(params.anomalyRegion.h * canvas.height),
+    };
+    const feather = document.createElement("canvas");
+    feather.width = regionPx.w;
+    feather.height = regionPx.h;
+    const fctx = feather.getContext("2d")!;
+    const cx = regionPx.w / 2;
+    const cy = regionPx.h / 2;
+    const grad = fctx.createRadialGradient(cx, cy, 0, cx, cy, Math.max(cx, cy));
+    grad.addColorStop(0, "rgba(255,255,255,1)");
+    grad.addColorStop(0.6, "rgba(255,255,255,1)");
+    grad.addColorStop(1, "rgba(255,255,255,0)");
+    fctx.fillStyle = grad;
+    fctx.fillRect(0, 0, regionPx.w, regionPx.h);
+    featherMaskRef.current = feather;
+
+    const scratch = document.createElement("canvas");
+    scratch.width = regionPx.w;
+    scratch.height = regionPx.h;
+    regionScratchRef.current = scratch;
+
+    video.currentTime = 0;
+    video.pause();
+
+    stopAudioRef.current = getAudioEngine().playVideoClip({
+      video,
+      durationMs: clipDurationMs,
+      droneStartHz: params.droneStartHz,
+      droneEndHz: params.droneEndHz,
+      warpRate: params.warpRate,
+    });
+    void video.play();
+    startRef.current = performance.now();
+
+    function pulseBurst() {
+      setStaticBurst(true);
+      setTimeout(() => setStaticBurst(false), 160);
+    }
+
+    function sampleBuffer(elapsed: number) {
+      if (elapsed - lastSampleRef.current < LAG_SAMPLE_INTERVAL_MS) return;
+      lastSampleRef.current = elapsed;
+      const snap = document.createElement("canvas");
+      snap.width = canvas!.width;
+      snap.height = canvas!.height;
+      snap.getContext("2d")!.drawImage(canvas!, 0, 0);
+      bufferRef.current.push({ t: elapsed, canvas: snap });
+      const cutoff = elapsed - LAG_BUFFER_MAX_MS;
+      while (bufferRef.current.length && bufferRef.current[0].t < cutoff) bufferRef.current.shift();
+    }
+
+    function findBufferedFrame(targetT: number): BufferedFrame | null {
+      const arr = bufferRef.current;
+      if (arr.length === 0) return null;
+      let best = arr[0];
+      for (const f of arr) {
+        if (f.t <= targetT) best = f;
+        else break;
+      }
+      return best;
+    }
+
+    function tick() {
+      const ctx = canvas!.getContext("2d");
+      if (!ctx) return;
+      const elapsed = performance.now() - startRef.current;
+
+      if (elapsed >= clipDurationMs) {
+        // Hard cut — instant, no fade, in sync with the audio's own cutoff.
+        ctx.fillStyle = "#000";
+        ctx.fillRect(0, 0, canvas!.width, canvas!.height);
+        video!.pause();
+        stopAudioRef.current?.();
+        stopAudioRef.current = null;
+        setIsPlaying(false);
+        onDone?.();
+        return;
+      }
+
+      if (elapsed >= freezeStartMs) {
+        // Held freeze-frame right before the cut — stop advancing the
+        // video, keep redrawing the frame it froze on.
+        if (!frozenRef.current) {
+          frozenRef.current = true;
+          video!.pause();
+          if (!burstFiredRef.current.freeze) {
+            burstFiredRef.current.freeze = true;
+            pulseBurst();
+          }
+        }
+        rafRef.current = requestAnimationFrame(tick);
+        return;
+      }
+
+      ctx.drawImage(video!, 0, 0, canvas!.width, canvas!.height);
+      sampleBuffer(elapsed);
+
+      if (elapsed >= anomalyStartMs && elapsed <= anomalyEndMs) {
+        // The one unnatural-motion moment: one region of the frame lags
+        // behind real time, sampled from a moment in the recent past,
+        // while the rest of the frame plays normally.
+        if (!burstFiredRef.current.anomaly) {
+          burstFiredRef.current.anomaly = true;
+          pulseBurst();
+        }
+        const buffered = findBufferedFrame(elapsed - params.lagMs);
+        const scratch = regionScratchRef.current;
+        const mask = featherMaskRef.current;
+        if (buffered && scratch && mask) {
+          const x = Math.round(params.anomalyRegion.x * canvas!.width);
+          const y = Math.round(params.anomalyRegion.y * canvas!.height);
+          const w = scratch.width;
+          const h = scratch.height;
+          const sctx = scratch.getContext("2d")!;
+          sctx.clearRect(0, 0, w, h);
+          sctx.drawImage(buffered.canvas, x, y, w, h, 0, 0, w, h);
+          sctx.globalCompositeOperation = "destination-in";
+          sctx.drawImage(mask, 0, 0);
+          sctx.globalCompositeOperation = "source-over";
+
+          ctx.globalAlpha = params.wrongnessIntensity;
+          ctx.drawImage(scratch, x, y);
+          ctx.globalAlpha = 1;
+        }
+      }
+
+      rafRef.current = requestAnimationFrame(tick);
+    }
+
+    rafRef.current = requestAnimationFrame(tick);
+  }
+
+  return (
+    <div style={{ position: "relative" }}>
+      <video
+        ref={videoRef}
+        src={videoUrl}
+        onLoadedMetadata={handleLoadedMetadata}
+        muted={false}
+        playsInline
+        style={{ display: "none" }}
+      />
+      <canvas
+        ref={canvasRef}
+        width={dims.w}
+        height={dims.h}
+        style={{
+          width: "100%",
+          height: "auto",
+          aspectRatio: `${dims.w} / ${dims.h}`,
+          background: "#000",
+          borderRadius: 8,
+          display: "block",
+        }}
+      />
+      {isPlaying && (
+        <>
+          <NoiseCanvas boost={staticBurst} />
+          <div
+            aria-hidden
+            className="pointer-events-none fixed inset-0 z-10 opacity-[0.05]"
+            style={{
+              backgroundImage:
+                "repeating-linear-gradient(to bottom, rgba(255,255,255,0.5) 0px, rgba(255,255,255,0.5) 1px, transparent 1px, transparent 3px)",
+            }}
+          />
+          <div
+            aria-hidden
+            className="pointer-events-none fixed inset-0 z-10"
+            style={{
+              background: "radial-gradient(ellipse at center, transparent 42%, rgba(0,0,0,0.55) 100%)",
+            }}
+          />
+          {staticBurst && <div className="pointer-events-none fixed inset-0 z-30 bg-white/10 mix-blend-difference" />}
+        </>
+      )}
+    </div>
+  );
+}

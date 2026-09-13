@@ -1,82 +1,100 @@
 "use client";
 
-import { useMemo, useState } from "react";
-import ClipStage, { type ClipParams } from "@/components/ClipStage";
+import { useEffect, useRef, useState } from "react";
+import VideoStage from "@/components/VideoStage";
 
-const DEFAULT_PARAMS: ClipParams = {
-  wrongnessIntensity: 0.05,
-  mundanePct: 60,
-  buildPct: 30,
-  spikePct: 10,
-  durationMs: 7000,
-  droneStartHz: 220,
-  droneEndHz: 25,
+type DurationChoice = "short" | "medium" | "long";
+const DURATION_MS: Record<DurationChoice, number> = {
+  short: 5000,
+  medium: 10000,
+  long: 15000,
 };
 
-function Slider({
-  label,
-  value,
-  min,
-  max,
-  step,
-  unit,
-  disabled,
-  onChange,
-}: {
-  label: string;
-  value: number;
-  min: number;
-  max: number;
-  step: number;
-  unit?: string;
-  disabled?: boolean;
-  onChange: (v: number) => void;
-}) {
+const ACCEPTED_TYPES = ["video/mp4", "video/quicktime", "video/webm"];
+
+function DropZone({ onFile }: { onFile: (file: File) => void }) {
+  const [dragOver, setDragOver] = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  function handleFiles(files: FileList | null) {
+    const file = files?.[0];
+    if (file) onFile(file);
+  }
+
   return (
-    <label style={{ display: "block", marginBottom: 14 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, marginBottom: 4 }}>
-        <span>{label}</span>
-        <span style={{ color: "#9a9a9a" }}>
-          {value}
-          {unit ?? ""}
-        </span>
-      </div>
+    <div
+      onClick={() => inputRef.current?.click()}
+      onDragOver={(e) => {
+        e.preventDefault();
+        setDragOver(true);
+      }}
+      onDragLeave={() => setDragOver(false)}
+      onDrop={(e) => {
+        e.preventDefault();
+        setDragOver(false);
+        handleFiles(e.dataTransfer.files);
+      }}
+      style={{
+        border: `2px dashed ${dragOver ? "#e8e8e8" : "#444"}`,
+        borderRadius: 10,
+        padding: "64px 24px",
+        textAlign: "center",
+        cursor: "pointer",
+        color: "#9a9a9a",
+        background: dragOver ? "#1a1a1c" : "transparent",
+        maxWidth: 640,
+      }}
+    >
+      <p style={{ margin: 0, fontSize: 15 }}>Drop a video here, or click to choose one.</p>
+      <p style={{ margin: "6px 0 0", fontSize: 12 }}>mp4, mov, or webm</p>
       <input
-        type="range"
-        min={min}
-        max={max}
-        step={step}
-        value={value}
-        disabled={disabled}
-        onChange={(e) => onChange(Number(e.target.value))}
-        style={{ width: "100%" }}
+        ref={inputRef}
+        type="file"
+        accept="video/mp4,video/quicktime,video/webm"
+        style={{ display: "none" }}
+        onChange={(e) => handleFiles(e.target.files)}
       />
-    </label>
+    </div>
   );
 }
 
 export default function App() {
-  const [params, setParams] = useState<ClipParams>(DEFAULT_PARAMS);
+  const [file, setFile] = useState<File | null>(null);
+  const [videoUrl, setVideoUrl] = useState<string | null>(null);
+  const [duration, setDuration] = useState<DurationChoice>("medium");
+  const [seed, setSeed] = useState(0);
   const [playToken, setPlayToken] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
+  const hasPlayedRef = useRef(false);
 
-  const totalPct = params.mundanePct + params.buildPct + params.spikePct;
-  const normalized = useMemo(() => {
-    const total = totalPct || 1;
-    return {
-      mundaneMs: (params.durationMs * params.mundanePct) / total,
-      buildMs: (params.durationMs * params.buildPct) / total,
-      spikeMs: (params.durationMs * params.spikePct) / total,
+  useEffect(() => {
+    return () => {
+      if (videoUrl) URL.revokeObjectURL(videoUrl);
     };
-  }, [params, totalPct]);
+  }, [videoUrl]);
 
-  function set<K extends keyof ClipParams>(key: K, value: ClipParams[K]) {
-    setParams((p) => ({ ...p, [key]: value }));
+  function handleFile(f: File) {
+    if (!ACCEPTED_TYPES.includes(f.type)) return;
+    if (videoUrl) URL.revokeObjectURL(videoUrl);
+    setFile(f);
+    setVideoUrl(URL.createObjectURL(f));
+    setPlayToken(0);
+    hasPlayedRef.current = false;
+  }
+
+  function handleReset() {
+    if (videoUrl) URL.revokeObjectURL(videoUrl);
+    setFile(null);
+    setVideoUrl(null);
+    setPlayToken(0);
+    hasPlayedRef.current = false;
   }
 
   function handleGenerate() {
     if (isPlaying) return;
+    hasPlayedRef.current = true;
     setIsPlaying(true);
+    setSeed(Math.floor(Math.random() * 2 ** 31));
     setPlayToken((t) => t + 1);
   }
 
@@ -94,119 +112,83 @@ export default function App() {
       <header style={{ padding: "16px 24px", borderBottom: "1px solid #222" }}>
         <h1 style={{ fontSize: 18, margin: 0 }}>Creepy Shorts Generator</h1>
         <p style={{ margin: "4px 0 0", fontSize: 13, color: "#9a9a9a" }}>
-          Procedural short clips: mundane → build → spike → hard cut. No live model calls — everything below is
-          driven directly by the three parameters.
+          Upload a clip, then process it into a short, disturbing found-footage cut. No AI-generated content — this
+          only reprocesses footage you already have.
         </p>
       </header>
 
-      <main style={{ flex: 1, display: "flex", gap: 24, padding: 24, flexWrap: "wrap" }}>
-        <section style={{ flex: "1 1 640px", minWidth: 320 }}>
+      <main style={{ flex: 1, padding: 24 }}>
+        {!videoUrl ? (
+          <DropZone onFile={handleFile} />
+        ) : (
           <div style={{ maxWidth: 960 }}>
-            <ClipStage params={params} playToken={playToken} onDone={() => setIsPlaying(false)} />
+            <VideoStage
+              videoUrl={videoUrl}
+              durationMs={DURATION_MS[duration]}
+              seed={seed}
+              playToken={playToken}
+              onDone={() => setIsPlaying(false)}
+            />
+
+            <div style={{ marginTop: 16, display: "flex", alignItems: "center", gap: 24, flexWrap: "wrap" }}>
+              <button
+                onClick={handleGenerate}
+                disabled={isPlaying}
+                style={{
+                  padding: "10px 20px",
+                  fontSize: 15,
+                  fontWeight: 600,
+                  borderRadius: 6,
+                  border: "1px solid #444",
+                  background: isPlaying ? "#2a2a2a" : "#e8e8e8",
+                  color: isPlaying ? "#888" : "#111",
+                  cursor: isPlaying ? "default" : "pointer",
+                }}
+              >
+                {isPlaying ? "Playing…" : hasPlayedRef.current ? "Regenerate" : "Generate clip"}
+              </button>
+
+              <div style={{ display: "flex", gap: 8 }}>
+                {(["short", "medium", "long"] as DurationChoice[]).map((choice) => (
+                  <button
+                    key={choice}
+                    onClick={() => setDuration(choice)}
+                    disabled={isPlaying}
+                    style={{
+                      padding: "8px 14px",
+                      fontSize: 13,
+                      borderRadius: 6,
+                      border: `1px solid ${duration === choice ? "#e8e8e8" : "#444"}`,
+                      background: duration === choice ? "#2a2a2a" : "transparent",
+                      color: duration === choice ? "#e8e8e8" : "#9a9a9a",
+                      cursor: isPlaying ? "default" : "pointer",
+                      textTransform: "capitalize",
+                    }}
+                  >
+                    {choice} (~{DURATION_MS[choice] / 1000}s)
+                  </button>
+                ))}
+              </div>
+
+              <button
+                onClick={handleReset}
+                disabled={isPlaying}
+                style={{
+                  padding: "8px 14px",
+                  fontSize: 13,
+                  borderRadius: 6,
+                  border: "1px solid transparent",
+                  background: "transparent",
+                  color: "#777",
+                  cursor: isPlaying ? "default" : "pointer",
+                  textDecoration: "underline",
+                }}
+              >
+                choose a different video
+              </button>
+            </div>
           </div>
-          <button
-            onClick={handleGenerate}
-            disabled={isPlaying}
-            style={{
-              marginTop: 16,
-              padding: "10px 20px",
-              fontSize: 15,
-              fontWeight: 600,
-              borderRadius: 6,
-              border: "1px solid #444",
-              background: isPlaying ? "#2a2a2a" : "#e8e8e8",
-              color: isPlaying ? "#888" : "#111",
-              cursor: isPlaying ? "default" : "pointer",
-            }}
-          >
-            {isPlaying ? "Playing…" : "Generate clip"}
-          </button>
-        </section>
-
-        <section style={{ flex: "0 0 320px", minWidth: 280 }}>
-          <h2 style={{ fontSize: 14, textTransform: "uppercase", letterSpacing: 0.5, color: "#9a9a9a" }}>
-            Wrongness
-          </h2>
-          <Slider
-            label="Spike intensity"
-            value={params.wrongnessIntensity}
-            min={0}
-            max={1}
-            step={0.01}
-            disabled={isPlaying}
-            onChange={(v) => set("wrongnessIntensity", v)}
-          />
-
-          <h2 style={{ fontSize: 14, textTransform: "uppercase", letterSpacing: 0.5, color: "#9a9a9a", marginTop: 20 }}>
-            Audio drone
-          </h2>
-          <Slider
-            label="Start pitch"
-            value={params.droneStartHz}
-            min={80}
-            max={440}
-            step={5}
-            unit=" Hz"
-            disabled={isPlaying}
-            onChange={(v) => set("droneStartHz", v)}
-          />
-          <Slider
-            label="End pitch (felt, not heard)"
-            value={params.droneEndHz}
-            min={15}
-            max={35}
-            step={1}
-            unit=" Hz"
-            disabled={isPlaying}
-            onChange={(v) => set("droneEndHz", v)}
-          />
-
-          <h2 style={{ fontSize: 14, textTransform: "uppercase", letterSpacing: 0.5, color: "#9a9a9a", marginTop: 20 }}>
-            Timeline
-          </h2>
-          <Slider
-            label="Total duration"
-            value={params.durationMs}
-            min={5000}
-            max={10000}
-            step={250}
-            unit=" ms"
-            disabled={isPlaying}
-            onChange={(v) => set("durationMs", v)}
-          />
-          <Slider
-            label="Mundane %"
-            value={params.mundanePct}
-            min={0}
-            max={100}
-            step={1}
-            disabled={isPlaying}
-            onChange={(v) => set("mundanePct", v)}
-          />
-          <Slider
-            label="Build %"
-            value={params.buildPct}
-            min={0}
-            max={100}
-            step={1}
-            disabled={isPlaying}
-            onChange={(v) => set("buildPct", v)}
-          />
-          <Slider
-            label="Spike %"
-            value={params.spikePct}
-            min={0}
-            max={100}
-            step={1}
-            disabled={isPlaying}
-            onChange={(v) => set("spikePct", v)}
-          />
-          <p style={{ fontSize: 12, color: "#777", marginTop: -6 }}>
-            Normalized to {(params.durationMs / 1000).toFixed(1)}s: mundane {(normalized.mundaneMs / 1000).toFixed(1)}s ·
-            build {(normalized.buildMs / 1000).toFixed(1)}s · spike {(normalized.spikeMs / 1000).toFixed(1)}s, then an
-            instant cut.
-          </p>
-        </section>
+        )}
       </main>
     </div>
   );

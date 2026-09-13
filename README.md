@@ -1,6 +1,6 @@
 # Creepy Shorts Generator
 
-A small local dev tool that generates short, disturbing procedural video clips on demand: click **Generate clip**, a canvas scene renders and plays with synced Web Audio, then cuts hard to black. Nothing here calls a model at generation time — every clip is fully procedural, driven by the three parameters below.
+A small local dev tool that turns a video you upload into a short, disturbing found-footage cut: drop in a clip, hit **Generate clip**, and it plays back through an effects pipeline with synced Web Audio, then cuts hard to black. Nothing here calls a model or generates video — it only reprocesses footage you already have.
 
 ## Run it
 
@@ -9,36 +9,40 @@ npm install
 npm run dev
 ```
 
-Open the printed local URL, click **Generate clip**, and screen-record — v1 has no built-in export.
+Open the printed local URL, drop in an mp4/mov/webm, hit **Generate clip**, and screen-record — there's no built-in export yet.
 
-## The clip: one scene, four phases
+## Pipeline
 
-A light source sways in a dark room for a short, adjustable duration (default 7s, 5–10s range) with a deliberate four-phase structure:
+1. **Upload** — a drop zone / file picker loads your video into a hidden `<video>` element.
+2. **Canvas playback** — the video is drawn to a `<canvas>` frame-by-frame (not a plain `<video>` tag), so effects can be composited on top and one region can be manipulated independently of the rest.
+3. **Degradation overlay** — `NoiseCanvas.tsx` (grain) plus scanline and vignette layers (adapted from `Atmosphere.tsx`) sit over the playing canvas, full-viewport, only while a clip is playing.
+4. **One unnatural-motion moment** — for a short window, one region of the frame is redrawn from a few hundred milliseconds in the past (sampled from a rolling frame buffer) instead of the live frame, so that patch of the image visibly lags/loops relative to the rest. The region's edges are feathered (a radial alpha mask) rather than a hard rectangle, so it reads as the scene misbehaving rather than a pasted overlay.
+5. **Held freeze-frame** — playback pauses on a single frame for several hundred ms right before the cut.
+6. **Hard cut** — instant cut to black, cutting the video before it would naturally end; audio cuts in the same instant, no fade.
 
-1. **Mundane** — the scene reads as ordinary: a warm light, gentle natural sway (two blended sine frequencies), nothing unsettling.
-2. **Build** — the light's motion smoothly interpolates from that natural sway toward a single, perfectly regular, too-slow sine — "almost imperceptibly less natural." The audio drone (below) is continuously detuning downward under this the whole time.
-3. **Spike** — the frame freezes on the exact moment the build phase ends, and a second, identical light source appears where the scene only ever established one. This is the one wrongness moment — narrow and singular, not stacked with other effects.
-4. **Hard cut** — instant cut to black, audio cut in the same instant, no fade.
+Audio (`src/lib/audio.ts`'s `playVideoClip()`):
+- The video's own audio is routed through Web Audio (not played directly) so it can be shaped: a slow "approach" (rising volume + drifting stereo pan across the whole clip) and a linked slight pitch-down/time-stretch (`video.playbackRate < 1` with pitch correction disabled — slowing playback shifts pitch down for free).
+- A separate, always-present drone continuously pitch-shifts down toward the 20–30Hz felt-not-heard range underneath the video's own audio, same as v1.
+- Both layers share one hard cutoff at the cut to black.
 
-All motion is a deterministic function of elapsed time and the current parameters (no per-clip randomness in the phase/motion logic — only the grain texture is randomized, same as film grain would be).
+## Human-facing controls (no raw parameters)
 
-## Three tunable parameters
+- **Duration** — Short (~5s) / Medium (~10s) / Long (~15s) buttons. Actual clip length is clamped to whatever the source video can support.
+- **Generate clip / Regenerate** — one button. Each click derives a fresh set of effect parameters (anomaly region/timing, drone pitch, wrongness intensity, warp amount, freeze length) from a new random seed, landing them inside a pre-tuned "creepy zone" (`src/lib/random.ts`'s `pickCreepyParams()`) — never maxed out, never fully unbounded. Same seed always reproduces the same params; only the seed itself is random per click.
 
-- **Wrongness intensity** (`Spike intensity`, 0–1, default 0.05) — how far the spike's duplicated light deviates from the original: its offset distance and how visible it is. Subtle by default.
-- **Pitch-shift-down audio layer** (`Start pitch` / `End pitch`) — a dedicated oscillator, separate from the scene's melody/tone layer, that continuously and audibly sinks in pitch across the whole clip, from an audible start frequency toward the 20–30Hz felt-not-heard range by the spike moment. Always present, hard cutoff at the cut to black.
-- **Timeline structure** (`Total duration`, `Mundane %` / `Build %` / `Spike %`) — the four-phase pacing as adjustable percentages (normalized to 100% and applied to the total duration) rather than hardcoded splits.
-
-See `src/components/ClipStage.tsx` for the scene/timeline logic and `src/lib/audio.ts`'s `playGeneratedClip()` for the audio layers.
+There are no sliders in the UI. The underlying parameters still exist in code (see `random.ts`), just randomized within a tight internal range instead of exposed — tune the ranges there after watching a few outputs.
 
 ## What's also here (forked engine primitives)
 
-This project was forked from [Anomaly](https://github.com/numbersgoupihope/anomaly-game)'s rendering engine, stripped of all chat/story/game-state logic. A few framework-agnostic building blocks from that extraction are still present in `src/` even though the v1 app above doesn't use them directly:
+This project was forked from [Anomaly](https://github.com/numbersgoupihope/anomaly-game)'s rendering engine, stripped of all chat/story/game-state logic:
 
-- `src/lib/audio.ts` — `getAudioEngine()`, a Web Audio singleton (ambient drone, stingers, and the clip audio described above — nothing here is a recorded/loaded asset).
-- `src/lib/useAnalogGlitch.ts` / `src/lib/useScrollbackGlitch.ts` — glitch-timing hooks.
-- `src/components/NoiseCanvas.tsx`, `src/components/Atmosphere.tsx`, `src/components/SoundToggle.tsx` — composited grain/scanline/vignette UI chrome (Tailwind-class based; Tailwind itself isn't set up in this repo, so these render unstyled unless you add it).
-- `src/components/HomeVideoClip.tsx`, `src/components/CorruptedAttachment.tsx` — the original click-to-play warped-clip components this project's scene design is descended from.
+- `src/lib/audio.ts` — `getAudioEngine()`, a Web Audio singleton (ambient drone, stingers, and both clip-audio pipelines above).
+- `src/lib/useAnalogGlitch.ts` / `src/lib/useScrollbackGlitch.ts` — glitch-timing hooks, not currently used by the video pipeline.
+- `src/components/NoiseCanvas.tsx` — wired into the video stage (see above). `Atmosphere.tsx` / `SoundToggle.tsx` are not used directly: `Atmosphere` bundles `SoundToggle`, which auto-starts a separate ambient background drone on first interaction — that would compete with the clip's own dedicated drone, so `VideoStage.tsx` reimplements Atmosphere's scanline/vignette visual layers inline instead of importing it.
+- `src/components/HomeVideoClip.tsx`, `src/components/CorruptedAttachment.tsx` — the original click-to-play warped-clip components; superseded by the video-upload pipeline for this app but kept as reference.
 
-## What's not in v1
+Tailwind is now configured (`tailwind.config.js`, `postcss.config.js`, `src/index.css`) specifically so `NoiseCanvas.tsx`'s utility classes actually render — it wasn't set up before v2.
 
-No multiple scene types, no accounts/public UI, no automatic video export (MediaRecorder), no live model calls per clip — see the kickoff spec for the full list.
+## What's not here yet
+
+No automatic video export/download (screen-recording remains the plan), no multiple effect "styles," no accounts/public UI, no live model calls.
