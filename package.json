@@ -1,0 +1,15 @@
+{
+  "name": "anomaly-fx",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Canvas rendering, procedural Web Audio synthesis, and warp/glitch effects extracted from Anomaly.",
+  "peerDependencies": {
+    "react": ">=18",
+    "react-dom": ">=18"
+  },
+  "devDependencies": {
+    "typescript": "^5",
+    "@types/react": "^18",
+    "@types/react-dom": "^18"
+  }
+}
