@@ -37,11 +37,19 @@ export interface CreepyParams {
 
 /** Picks effect parameters within a pre-tuned "creepy zone" — never the
  * most extreme setting, never fully random/unbounded. Same seed always
- * yields the same params; Regenerate just picks a new seed. */
+ * yields the same params; Regenerate just picks a new seed.
+ *
+ * TEMP (v4 diagnostic pass): wrongnessIntensity and freezeHoldMs are
+ * pushed to their most extreme, obvious values instead of the tuned
+ * "creepy zone" ranges below (still present but commented out) — real
+ * footage testing reported no perceptible anomaly/freeze at all, and the
+ * only way to tell a tuning problem from a pipeline problem is to prove
+ * each effect fires unmistakably before dialing anything back down.
+ * Revert to the commented ranges once that's confirmed. */
 export function pickCreepyParams(seed: number): CreepyParams {
   const rng = mulberry32(seed);
   return {
-    wrongnessIntensity: randRange(rng, 0.35, 0.6),
+    wrongnessIntensity: randRange(rng, 0.9, 1.0), // was randRange(rng, 0.35, 0.6)
     droneStartHz: randRange(rng, 150, 260),
     droneEndHz: randRange(rng, 18, 28),
     warpRate: randRange(rng, 0.94, 0.985),
@@ -54,6 +62,6 @@ export function pickCreepyParams(seed: number): CreepyParams {
     },
     anomalyStartFrac: randRange(rng, 0.5, 0.66),
     anomalyDurMs: randRange(rng, 1400, 2200),
-    freezeHoldMs: randRange(rng, 420, 680),
+    freezeHoldMs: randRange(rng, 1800, 2000), // was randRange(rng, 420, 680)
   };
 }

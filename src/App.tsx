@@ -33,8 +33,15 @@ export default function App() {
     if (isPlaying) return;
     hasPlayedRef.current = true;
     setIsPlaying(true);
-    setClipIndex(Math.floor(Math.random() * CLIPS.length));
-    setSeed(Math.floor(Math.random() * 2 ** 31));
+    // TEMP (v4 diagnostic pass): ?clip=<id>&seed=<n> force a specific
+    // clip/seed instead of a random pick, so a screen-capture walkthrough
+    // is reproducible. Remove once done.
+    const params = new URLSearchParams(window.location.search);
+    const forcedClip = params.get("clip");
+    const forcedIdx = forcedClip ? CLIPS.findIndex((c) => c.id === forcedClip) : -1;
+    const forcedSeed = params.get("seed");
+    setClipIndex(forcedIdx >= 0 ? forcedIdx : Math.floor(Math.random() * CLIPS.length));
+    setSeed(forcedSeed ? Number(forcedSeed) : Math.floor(Math.random() * 2 ** 31));
     setPlayToken((t) => t + 1);
   }
 

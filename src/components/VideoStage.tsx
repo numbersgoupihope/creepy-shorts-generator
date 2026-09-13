@@ -43,6 +43,10 @@ export default function VideoStage({
   const [dims, setDims] = useState({ w: 640, h: 360 });
   const [staticBurst, setStaticBurst] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
+  // TEMP diagnostic readout (v4) — on-screen elapsed-time counter so a
+  // screen capture can show exactly when the cut fires relative to the
+  // timeline, rather than relying on eyeballing it.
+  const [debugElapsedMs, setDebugElapsedMs] = useState(0);
 
   useEffect(() => {
     return () => {
@@ -96,9 +100,21 @@ export default function VideoStage({
     // Cut before the source would naturally end — leave a little slack for
     // the freeze hold.
     const clipDurationMs = Math.min(durationMs, Math.max(1000, videoDurationMs - 200));
-    const freezeStartMs = clipDurationMs - params.freezeHoldMs;
-    const anomalyStartMs = Math.min(params.anomalyStartFrac * clipDurationMs, freezeStartMs - 300);
-    const anomalyEndMs = Math.min(anomalyStartMs + params.anomalyDurMs, freezeStartMs - 50);
+    // Freeze can't eat more than half the clip — guards short clips
+    // against a freezeHoldMs that would otherwise swallow everything.
+    const freezeHoldMs = Math.min(params.freezeHoldMs, clipDurationMs * 0.5);
+    const freezeStartMs = clipDurationMs - freezeHoldMs;
+    // Fit the anomaly inside whatever's left before freeze starts (minus
+    // a small gap so the two never touch), instead of independently
+    // clamping its start and end against freezeStartMs — that used to
+    // let a long freeze hold squeeze the anomaly's actual on-screen
+    // duration down to a sliver (or effectively zero) without anything
+    // signaling it had happened, which read as "the anomaly never fires"
+    // even though the code path did run.
+    const anomalyBudgetMs = Math.max(0, freezeStartMs - 300);
+    const anomalyDurMs = Math.min(params.anomalyDurMs, anomalyBudgetMs);
+    const anomalyStartMs = Math.min(params.anomalyStartFrac * clipDurationMs, anomalyBudgetMs - anomalyDurMs);
+    const anomalyEndMs = anomalyStartMs + anomalyDurMs;
 
     bufferRef.current = [];
     lastSampleRef.current = -Infinity;
@@ -134,6 +150,21 @@ export default function VideoStage({
     scratch.width = regionPx.w;
     scratch.height = regionPx.h;
     regionScratchRef.current = scratch;
+
+    // TEMP diagnostic logging (v4) — exact computed phase boundaries for
+    // this run, so a screen capture can be cross-referenced frame-for-
+    // frame against what the pipeline actually scheduled.
+    console.log("[creepy-debug] clip:", videoUrl, {
+      clipDurationMs: Math.round(clipDurationMs),
+      freezeStartMs: Math.round(freezeStartMs),
+      freezeHoldMs: Math.round(freezeHoldMs),
+      anomalyStartMs: Math.round(anomalyStartMs),
+      anomalyEndMs: Math.round(anomalyEndMs),
+      wrongnessIntensity: params.wrongnessIntensity.toFixed(2),
+      droneStartHz: Math.round(params.droneStartHz),
+      droneEndHz: Math.round(params.droneEndHz),
+      warpRate: params.warpRate,
+    });
 
     video.currentTime = 0;
     video.pause();
@@ -183,6 +214,9 @@ export default function VideoStage({
 
       if (elapsed >= clipDurationMs) {
         // Hard cut — instant, no fade, in sync with the audio's own cutoff.
+        console.log(
+          `[creepy-debug] CUT at elapsed=${Math.round(elapsed)}ms (scheduled clipDurationMs=${Math.round(clipDurationMs)}, source video.duration=${Math.round(video!.duration * 1000)}ms) — cut fired ${Math.round(video!.duration * 1000 - elapsed)}ms before the source's own end.`,
+        );
         ctx.fillStyle = "#000";
         ctx.fillRect(0, 0, canvas!.width, canvas!.height);
         video!.pause();
@@ -198,18 +232,21 @@ export default function VideoStage({
         // video, keep redrawing the frame it froze on.
         if (!frozenRef.current) {
           frozenRef.current = true;
+          console.log(`[creepy-debug] FREEZE start at elapsed=${Math.round(elapsed)}ms`);
           video!.pause();
           if (!burstFiredRef.current.freeze) {
             burstFiredRef.current.freeze = true;
             pulseBurst();
           }
         }
+        setDebugElapsedMs(Math.round(elapsed));
         rafRef.current = requestAnimationFrame(tick);
         return;
       }
 
       ctx.drawImage(video!, 0, 0, canvas!.width, canvas!.height);
       sampleBuffer(elapsed);
+      setDebugElapsedMs(Math.round(elapsed));
 
       if (elapsed >= anomalyStartMs && elapsed <= anomalyEndMs) {
         // The one unnatural-motion moment: one region of the frame lags
@@ -217,6 +254,7 @@ export default function VideoStage({
         // while the rest of the frame plays normally.
         if (!burstFiredRef.current.anomaly) {
           burstFiredRef.current.anomaly = true;
+          console.log(`[creepy-debug] ANOMALY start at elapsed=${Math.round(elapsed)}ms`);
           pulseBurst();
         }
         const buffered = findBufferedFrame(elapsed - params.lagMs);
@@ -294,6 +332,15 @@ export default function VideoStage({
             }}
           />
           {staticBurst && <div className="pointer-events-none fixed inset-0 z-30 bg-white/10 mix-blend-difference" />}
+          {/* TEMP diagnostic readout (v4) — remove once the pipeline's
+              perceptibility on real footage is confirmed. */}
+          <div
+            aria-hidden
+            className="pointer-events-none fixed z-40 rounded bg-black/70 px-2 py-1 font-mono text-xs text-lime-300"
+            style={{ top: 8, left: 8 }}
+          >
+            {(debugElapsedMs / 1000).toFixed(2)}s
+          </div>
         </>
       )}
     </div>

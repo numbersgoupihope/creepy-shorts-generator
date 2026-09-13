@@ -27,6 +27,15 @@ class AudioEngine {
   // instead of throwing on a second createMediaElementSource() call.
   private videoSources = new WeakMap<HTMLVideoElement, MediaElementAudioSourceNode>();
 
+  /** TEMP (v4 diagnostic pass) — lets an external capture script tap the
+   * real output graph (e.g. into a MediaStreamAudioDestinationNode) to
+   * record actual audio evidence instead of relying on ear/guesswork.
+   * Remove once the pipeline's perceptibility is confirmed. */
+  debugGetMasterGain(): GainNode {
+    this.ensureContext();
+    return this.masterGain!;
+  }
+
   private ensureContext(): AudioContext {
     if (!this.ctx) {
       const Ctx =
@@ -405,15 +414,26 @@ class AudioEngine {
 
     // The same always-present pitch-shift-down drone as the procedural
     // clip, running underneath the video's own (warped) audio.
+    //
+    // TEMP (v4 diagnostic pass): gain target and sweep speed pushed well
+    // past the tuned level — real-footage testing reported the drone as
+    // inaudible/"faint hum" under the clip's own audio, so prove it's
+    // actually firing and audibly moving before dialing back down.
     const droneGain = ctx.createGain();
     droneGain.gain.setValueAtTime(0, now);
-    droneGain.gain.linearRampToValueAtTime(0.2, now + 0.6);
+    droneGain.gain.linearRampToValueAtTime(0.65, now + 0.4); // was 0.2 over 0.6s
+
     droneGain.connect(this.masterGain!);
 
     const drone = ctx.createOscillator();
     drone.type = "sine";
     drone.frequency.setValueAtTime(droneStartHz, now);
-    drone.frequency.exponentialRampToValueAtTime(Math.max(1, droneEndHz), end);
+    // Sweep completes within the first 35% of the clip instead of
+    // gliding across the whole duration, then holds at the bottom — so
+    // the pitch-down is heard as a fast, obvious drop, not a slow drift.
+    const sweepEnd = now + duration * 0.35;
+    drone.frequency.exponentialRampToValueAtTime(Math.max(1, droneEndHz), sweepEnd);
+    drone.frequency.setValueAtTime(Math.max(1, droneEndHz), sweepEnd);
     drone.connect(droneGain);
     drone.start(now);
 
