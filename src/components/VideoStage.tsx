@@ -2,16 +2,88 @@
 
 import { useEffect, useRef, useState } from "react";
 import { getAudioEngine } from "@/lib/audio";
-import { pickCreepyParams } from "@/lib/random";
+import { pickCreepyParams, type CreepyParams } from "@/lib/random";
 import NoiseCanvas from "@/components/NoiseCanvas";
 
 const MAX_CANVAS_W = 960;
-const LAG_SAMPLE_INTERVAL_MS = 120;
-const LAG_BUFFER_MAX_MS = 2200;
+// How long each drawn frame is held before the next refresh — a rough
+// 13fps judder instead of smooth 30/60fps video, closer to a projected
+// Super 8 reel than a modern digital clip.
+const FRAME_HOLD_MS = 75;
+// Random per-held-frame translate, simulating film gate weave.
+const GATE_WEAVE_PX = 3;
+// Narrower-than-source pillarbox aspect (width/height) — classic Super 8.
+const TARGET_ASPECT = 4 / 3;
+// The shadow figure's idle-sway period; the motion-loop trick replays
+// whole multiples of this so the loop point is seamless (same phase
+// going in and coming out) rather than a visible jump-cut.
+const SWAY_PERIOD_MS = 2200;
 
-interface BufferedFrame {
-  t: number;
-  canvas: HTMLCanvasElement;
+function loopedAnimMs(elapsedMs: number, loopStartMs: number, loopWindowMs: number): number {
+  if (elapsedMs >= loopStartMs && elapsedMs < loopStartMs + loopWindowMs) {
+    return loopStartMs - loopWindowMs + ((elapsedMs - loopStartMs) % loopWindowMs);
+  }
+  return elapsedMs;
+}
+
+/** The one ambiguous, human-shaped presence in the frame — a soft dark
+ * silhouette, never a rendered face or detail. It's meant to read as "is
+ * that a shadow, or someone standing there," not as an obvious graphic. */
+function drawFigure(ctx: CanvasRenderingContext2D, w: number, h: number, animMs: number, opacity: number, params: CreepyParams, offsetXPx: number) {
+  if (opacity <= 0.003) return;
+  const t = animMs / 1000;
+  const swayX = Math.sin((t * 2 * Math.PI * 1000) / SWAY_PERIOD_MS) * 3;
+  const breathe = 1 + 0.015 * Math.sin((t * 2 * Math.PI * 1000) / (SWAY_PERIOD_MS * 1.3));
+
+  const baseX = params.figureX * w + offsetXPx;
+  const baseY = params.figureY * h;
+  const figH = h * 0.34 * params.figureScale * breathe;
+  const figW = figH * 0.42;
+  const cx = baseX + swayX;
+
+  ctx.save();
+  ctx.globalAlpha = opacity;
+  ctx.globalCompositeOperation = "multiply";
+  ctx.fillStyle = "#0a0a0a";
+  ctx.beginPath();
+  ctx.ellipse(cx, baseY - figH * 0.38, figW * 0.5, figH * 0.42, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(cx, baseY - figH * 0.82, figW * 0.28, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawGrainAndGrade(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number) {
+  // Crushed blacks + a warm, sickly cast — old, under-processed film
+  // stock rather than clean digital video.
+  ctx.save();
+  ctx.globalCompositeOperation = "multiply";
+  ctx.fillStyle = "rgba(0,0,0,0.22)";
+  ctx.fillRect(x, y, w, h);
+  ctx.globalCompositeOperation = "overlay";
+  ctx.fillStyle = "rgba(255,170,80,0.12)";
+  ctx.fillRect(x, y, w, h);
+  ctx.restore();
+
+  // Grain — heavier than a clean digital source, unifies the real
+  // footage with the synthetic figure under one shared texture.
+  ctx.save();
+  ctx.globalAlpha = 1;
+  const count = Math.round((w * h) / 900);
+  for (let i = 0; i < count; i++) {
+    const gx = x + Math.random() * w;
+    const gy = y + Math.random() * h;
+    const v = Math.random();
+    ctx.fillStyle = v > 0.5 ? `rgba(255,255,255,${Math.random() * 0.12})` : `rgba(0,0,0,${Math.random() * 0.12})`;
+    ctx.fillRect(gx, gy, 1, 1);
+  }
+  // Occasional single-frame dropout / scratch — rare and brief.
+  if (Math.random() < 0.05) {
+    ctx.fillStyle = `rgba(230,230,230,${0.15 + Math.random() * 0.2})`;
+    ctx.fillRect(x + Math.random() * w, y, 1 + Math.random(), h);
+  }
+  ctx.restore();
 }
 
 export default function VideoStage({
@@ -34,19 +106,13 @@ export default function VideoStage({
   const rafRef = useRef<number | null>(null);
   const startRef = useRef(0);
   const stopAudioRef = useRef<(() => void) | null>(null);
-  const bufferRef = useRef<BufferedFrame[]>([]);
-  const lastSampleRef = useRef(0);
+  const heldFrameAtRef = useRef(-Infinity);
+  const jitterRef = useRef({ dx: 0, dy: 0 });
   const frozenRef = useRef(false);
-  const burstFiredRef = useRef({ anomaly: false, freeze: false });
-  const featherMaskRef = useRef<HTMLCanvasElement | null>(null);
-  const regionScratchRef = useRef<HTMLCanvasElement | null>(null);
   const [dims, setDims] = useState({ w: 640, h: 360 });
   const [staticBurst, setStaticBurst] = useState(false);
+  const [revealFlash, setRevealFlash] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
-  // TEMP diagnostic readout (v4) — on-screen elapsed-time counter so a
-  // screen capture can show exactly when the cut fires relative to the
-  // timeline, rather than relying on eyeballing it.
-  const [debugElapsedMs, setDebugElapsedMs] = useState(0);
 
   useEffect(() => {
     return () => {
@@ -104,67 +170,22 @@ export default function VideoStage({
     // against a freezeHoldMs that would otherwise swallow everything.
     const freezeHoldMs = Math.min(params.freezeHoldMs, clipDurationMs * 0.5);
     const freezeStartMs = clipDurationMs - freezeHoldMs;
-    // Fit the anomaly inside whatever's left before freeze starts (minus
-    // a small gap so the two never touch), instead of independently
-    // clamping its start and end against freezeStartMs — that used to
-    // let a long freeze hold squeeze the anomaly's actual on-screen
-    // duration down to a sliver (or effectively zero) without anything
-    // signaling it had happened, which read as "the anomaly never fires"
-    // even though the code path did run.
-    const anomalyBudgetMs = Math.max(0, freezeStartMs - 300);
-    const anomalyDurMs = Math.min(params.anomalyDurMs, anomalyBudgetMs);
-    const anomalyStartMs = Math.min(params.anomalyStartFrac * clipDurationMs, anomalyBudgetMs - anomalyDurMs);
-    const anomalyEndMs = anomalyStartMs + anomalyDurMs;
 
-    bufferRef.current = [];
-    lastSampleRef.current = -Infinity;
+    // The motion-loop: replay whole sway cycles verbatim so entry/exit
+    // are seamless (same phase), fit entirely before freeze starts.
+    const loopWindowMs = SWAY_PERIOD_MS * params.loopCycles;
+    const latestLoopStart = Math.max(0, freezeStartMs - 200 - loopWindowMs);
+    const loopStartMs = Math.min(params.loopStartFrac * clipDurationMs, latestLoopStart);
+
     frozenRef.current = false;
-    burstFiredRef.current = { anomaly: false, freeze: false };
+    heldFrameAtRef.current = -Infinity;
+    jitterRef.current = { dx: 0, dy: 0 };
     setIsPlaying(true);
-
-    // Pixel size of the anomaly region on this canvas, plus a soft radial
-    // feather mask sized to match — compositing the lagged patch through
-    // it avoids a hard rectangular seam, so it reads as the scene moving
-    // wrong rather than a visibly pasted overlay.
-    const regionPx = {
-      x: Math.round(params.anomalyRegion.x * canvas.width),
-      y: Math.round(params.anomalyRegion.y * canvas.height),
-      w: Math.round(params.anomalyRegion.w * canvas.width),
-      h: Math.round(params.anomalyRegion.h * canvas.height),
-    };
-    const feather = document.createElement("canvas");
-    feather.width = regionPx.w;
-    feather.height = regionPx.h;
-    const fctx = feather.getContext("2d")!;
-    const cx = regionPx.w / 2;
-    const cy = regionPx.h / 2;
-    const grad = fctx.createRadialGradient(cx, cy, 0, cx, cy, Math.max(cx, cy));
-    grad.addColorStop(0, "rgba(255,255,255,1)");
-    grad.addColorStop(0.6, "rgba(255,255,255,1)");
-    grad.addColorStop(1, "rgba(255,255,255,0)");
-    fctx.fillStyle = grad;
-    fctx.fillRect(0, 0, regionPx.w, regionPx.h);
-    featherMaskRef.current = feather;
-
-    const scratch = document.createElement("canvas");
-    scratch.width = regionPx.w;
-    scratch.height = regionPx.h;
-    regionScratchRef.current = scratch;
-
-    // TEMP diagnostic logging (v4) — exact computed phase boundaries for
-    // this run, so a screen capture can be cross-referenced frame-for-
-    // frame against what the pipeline actually scheduled.
-    console.log("[creepy-debug] clip:", videoUrl, {
-      clipDurationMs: Math.round(clipDurationMs),
-      freezeStartMs: Math.round(freezeStartMs),
-      freezeHoldMs: Math.round(freezeHoldMs),
-      anomalyStartMs: Math.round(anomalyStartMs),
-      anomalyEndMs: Math.round(anomalyEndMs),
-      wrongnessIntensity: params.wrongnessIntensity.toFixed(2),
-      droneStartHz: Math.round(params.droneStartHz),
-      droneEndHz: Math.round(params.droneEndHz),
-      warpRate: params.warpRate,
-    });
+    setRevealFlash(false);
+    // A cheap, DOM-only phase marker (not React state, so it costs no
+    // extra render) — lets a test drive its sampling off the pipeline's
+    // actual phase instead of guessing wall-clock offsets.
+    canvas.dataset.phase = "mundane";
 
     video.currentTime = 0;
     video.pause();
@@ -174,6 +195,8 @@ export default function VideoStage({
       durationMs: clipDurationMs,
       droneStartHz: params.droneStartHz,
       droneEndHz: params.droneEndHz,
+      droneGainTarget: params.droneGainTarget,
+      droneSweepFrac: params.droneSweepFrac,
       warpRate: params.warpRate,
     });
     void video.play();
@@ -181,42 +204,64 @@ export default function VideoStage({
 
     function pulseBurst() {
       setStaticBurst(true);
-      setTimeout(() => setStaticBurst(false), 160);
+      setTimeout(() => setStaticBurst(false), 180);
     }
 
-    function sampleBuffer(elapsed: number) {
-      if (elapsed - lastSampleRef.current < LAG_SAMPLE_INTERVAL_MS) return;
-      lastSampleRef.current = elapsed;
-      const snap = document.createElement("canvas");
-      snap.width = canvas!.width;
-      snap.height = canvas!.height;
-      snap.getContext("2d")!.drawImage(canvas!, 0, 0);
-      bufferRef.current.push({ t: elapsed, canvas: snap });
-      const cutoff = elapsed - LAG_BUFFER_MAX_MS;
-      while (bufferRef.current.length && bufferRef.current[0].t < cutoff) bufferRef.current.shift();
+    function innerRect(canvasW: number, canvasH: number) {
+      const innerH = canvasH;
+      const innerW = Math.min(canvasW, canvasH * TARGET_ASPECT);
+      return { x: (canvasW - innerW) / 2, y: 0, w: innerW, h: innerH };
     }
 
-    function findBufferedFrame(targetT: number): BufferedFrame | null {
-      const arr = bufferRef.current;
-      if (arr.length === 0) return null;
-      let best = arr[0];
-      for (const f of arr) {
-        if (f.t <= targetT) best = f;
-        else break;
+    function drawVideoCover(ctx: CanvasRenderingContext2D, rect: { x: number; y: number; w: number; h: number }) {
+      const vw = video!.videoWidth || rect.w;
+      const vh = video!.videoHeight || rect.h;
+      const targetAspect = rect.w / rect.h;
+      let sw = vw;
+      let sh = vh;
+      if (vw / vh > targetAspect) {
+        sw = vh * targetAspect;
+      } else {
+        sh = vw / targetAspect;
       }
-      return best;
+      const sx = (vw - sw) / 2;
+      const sy = (vh - sh) / 2;
+      ctx.drawImage(video!, sx, sy, sw, sh, rect.x, rect.y, rect.w, rect.h);
+    }
+
+    function renderFrame(elapsed: number, figureOpacity: number, duplicate: boolean) {
+      const canvasEl = canvas!;
+      const ctx = canvasEl.getContext("2d")!;
+      const rect = innerRect(canvasEl.width, canvasEl.height);
+
+      ctx.fillStyle = "#000";
+      ctx.fillRect(0, 0, canvasEl.width, canvasEl.height);
+
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(rect.x, rect.y, rect.w, rect.h);
+      ctx.clip();
+      ctx.translate(jitterRef.current.dx, jitterRef.current.dy);
+
+      drawVideoCover(ctx, rect);
+
+      const animMs = loopedAnimMs(elapsed, loopStartMs, loopWindowMs);
+      drawFigure(ctx, canvasEl.width, canvasEl.height, animMs, figureOpacity, params, 0);
+      if (duplicate) {
+        drawFigure(ctx, canvasEl.width, canvasEl.height, animMs, figureOpacity * 0.85, params, params.figureDuplicateOffsetFrac * canvasEl.width);
+      }
+
+      drawGrainAndGrade(ctx, rect.x, rect.y, rect.w, rect.h);
+      ctx.restore();
     }
 
     function tick() {
-      const ctx = canvas!.getContext("2d");
-      if (!ctx) return;
       const elapsed = performance.now() - startRef.current;
 
       if (elapsed >= clipDurationMs) {
         // Hard cut — instant, no fade, in sync with the audio's own cutoff.
-        console.log(
-          `[creepy-debug] CUT at elapsed=${Math.round(elapsed)}ms (scheduled clipDurationMs=${Math.round(clipDurationMs)}, source video.duration=${Math.round(video!.duration * 1000)}ms) — cut fired ${Math.round(video!.duration * 1000 - elapsed)}ms before the source's own end.`,
-        );
+        canvas!.dataset.phase = "cut";
+        const ctx = canvas!.getContext("2d")!;
         ctx.fillStyle = "#000";
         ctx.fillRect(0, 0, canvas!.width, canvas!.height);
         video!.pause();
@@ -228,54 +273,31 @@ export default function VideoStage({
       }
 
       if (elapsed >= freezeStartMs) {
-        // Held freeze-frame right before the cut — stop advancing the
-        // video, keep redrawing the frame it froze on.
         if (!frozenRef.current) {
           frozenRef.current = true;
-          console.log(`[creepy-debug] FREEZE start at elapsed=${Math.round(elapsed)}ms`);
+          canvas!.dataset.phase = "freeze";
           video!.pause();
-          if (!burstFiredRef.current.freeze) {
-            burstFiredRef.current.freeze = true;
-            pulseBurst();
-          }
+          // The reveal: the figure snaps from barely-there to
+          // unmistakable, duplicated, and holds — frozen — through the
+          // cut. One concentrated jolt: static burst, light-leak flash,
+          // and a sparse dissonant stinger, all at once.
+          renderFrame(elapsed, params.figureRevealOpacity, true);
+          pulseBurst();
+          setRevealFlash(true);
+          setTimeout(() => setRevealFlash(false), 220);
+          getAudioEngine().playRevealStinger();
         }
-        setDebugElapsedMs(Math.round(elapsed));
         rafRef.current = requestAnimationFrame(tick);
         return;
       }
 
-      ctx.drawImage(video!, 0, 0, canvas!.width, canvas!.height);
-      sampleBuffer(elapsed);
-      setDebugElapsedMs(Math.round(elapsed));
-
-      if (elapsed >= anomalyStartMs && elapsed <= anomalyEndMs) {
-        // The one unnatural-motion moment: one region of the frame lags
-        // behind real time, sampled from a moment in the recent past,
-        // while the rest of the frame plays normally.
-        if (!burstFiredRef.current.anomaly) {
-          burstFiredRef.current.anomaly = true;
-          console.log(`[creepy-debug] ANOMALY start at elapsed=${Math.round(elapsed)}ms`);
-          pulseBurst();
-        }
-        const buffered = findBufferedFrame(elapsed - params.lagMs);
-        const scratch = regionScratchRef.current;
-        const mask = featherMaskRef.current;
-        if (buffered && scratch && mask) {
-          const x = Math.round(params.anomalyRegion.x * canvas!.width);
-          const y = Math.round(params.anomalyRegion.y * canvas!.height);
-          const w = scratch.width;
-          const h = scratch.height;
-          const sctx = scratch.getContext("2d")!;
-          sctx.clearRect(0, 0, w, h);
-          sctx.drawImage(buffered.canvas, x, y, w, h, 0, 0, w, h);
-          sctx.globalCompositeOperation = "destination-in";
-          sctx.drawImage(mask, 0, 0);
-          sctx.globalCompositeOperation = "source-over";
-
-          ctx.globalAlpha = params.wrongnessIntensity;
-          ctx.drawImage(scratch, x, y);
-          ctx.globalAlpha = 1;
-        }
+      if (elapsed - heldFrameAtRef.current >= FRAME_HOLD_MS) {
+        heldFrameAtRef.current = elapsed;
+        jitterRef.current = {
+          dx: (Math.random() - 0.5) * 2 * GATE_WEAVE_PX,
+          dy: (Math.random() - 0.5) * 2 * GATE_WEAVE_PX,
+        };
+        renderFrame(elapsed, params.figureBaseOpacity, false);
       }
 
       rafRef.current = requestAnimationFrame(tick);
@@ -328,19 +350,17 @@ export default function VideoStage({
             aria-hidden
             className="pointer-events-none fixed inset-0 z-10"
             style={{
-              background: "radial-gradient(ellipse at center, transparent 42%, rgba(0,0,0,0.55) 100%)",
+              background: "radial-gradient(ellipse at center, transparent 38%, rgba(0,0,0,0.6) 100%)",
             }}
           />
           {staticBurst && <div className="pointer-events-none fixed inset-0 z-30 bg-white/10 mix-blend-difference" />}
-          {/* TEMP diagnostic readout (v4) — remove once the pipeline's
-              perceptibility on real footage is confirmed. */}
-          <div
-            aria-hidden
-            className="pointer-events-none fixed z-40 rounded bg-black/70 px-2 py-1 font-mono text-xs text-lime-300"
-            style={{ top: 8, left: 8 }}
-          >
-            {(debugElapsedMs / 1000).toFixed(2)}s
-          </div>
+          {revealFlash && (
+            <div
+              aria-hidden
+              className="pointer-events-none fixed inset-0 z-20"
+              style={{ background: "rgba(255,210,150,0.35)", mixBlendMode: "screen" }}
+            />
+          )}
         </>
       )}
     </div>

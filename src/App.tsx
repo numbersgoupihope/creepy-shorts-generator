@@ -33,9 +33,8 @@ export default function App() {
     if (isPlaying) return;
     hasPlayedRef.current = true;
     setIsPlaying(true);
-    // TEMP (v4 diagnostic pass): ?clip=<id>&seed=<n> force a specific
-    // clip/seed instead of a random pick, so a screen-capture walkthrough
-    // is reproducible. Remove once done.
+    // ?clip=<id>&seed=<n> force a specific clip/seed instead of a random
+    // pick — a small escape hatch for reproducing one exact run.
     const params = new URLSearchParams(window.location.search);
     const forcedClip = params.get("clip");
     const forcedIdx = forcedClip ? CLIPS.findIndex((c) => c.id === forcedClip) : -1;

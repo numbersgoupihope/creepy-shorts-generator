@@ -27,15 +27,6 @@ class AudioEngine {
   // instead of throwing on a second createMediaElementSource() call.
   private videoSources = new WeakMap<HTMLVideoElement, MediaElementAudioSourceNode>();
 
-  /** TEMP (v4 diagnostic pass) — lets an external capture script tap the
-   * real output graph (e.g. into a MediaStreamAudioDestinationNode) to
-   * record actual audio evidence instead of relying on ear/guesswork.
-   * Remove once the pipeline's perceptibility is confirmed. */
-  debugGetMasterGain(): GainNode {
-    this.ensureContext();
-    return this.masterGain!;
-  }
-
   private ensureContext(): AudioContext {
     if (!this.ctx) {
       const Ctx =
@@ -362,12 +353,16 @@ class AudioEngine {
     durationMs,
     droneStartHz,
     droneEndHz,
+    droneGainTarget,
+    droneSweepFrac,
     warpRate,
   }: {
     video: HTMLVideoElement;
     durationMs: number;
     droneStartHz: number;
     droneEndHz: number;
+    droneGainTarget: number;
+    droneSweepFrac: number;
     warpRate: number;
   }): () => void {
     const ctx = this.ensureContext();
@@ -413,25 +408,21 @@ class AudioEngine {
     videoGain.gain.setValueAtTime(0, end);
 
     // The same always-present pitch-shift-down drone as the procedural
-    // clip, running underneath the video's own (warped) audio.
-    //
-    // TEMP (v4 diagnostic pass): gain target and sweep speed pushed well
-    // past the tuned level — real-footage testing reported the drone as
-    // inaudible/"faint hum" under the clip's own audio, so prove it's
-    // actually firing and audibly moving before dialing back down.
+    // clip, running underneath the video's own (warped) audio — loud
+    // enough to be unmistakable, not a wash of noise over it.
     const droneGain = ctx.createGain();
     droneGain.gain.setValueAtTime(0, now);
-    droneGain.gain.linearRampToValueAtTime(0.65, now + 0.4); // was 0.2 over 0.6s
+    droneGain.gain.linearRampToValueAtTime(droneGainTarget, now + 0.6);
 
     droneGain.connect(this.masterGain!);
 
     const drone = ctx.createOscillator();
     drone.type = "sine";
     drone.frequency.setValueAtTime(droneStartHz, now);
-    // Sweep completes within the first 35% of the clip instead of
-    // gliding across the whole duration, then holds at the bottom — so
-    // the pitch-down is heard as a fast, obvious drop, not a slow drift.
-    const sweepEnd = now + duration * 0.35;
+    // Sweep completes within the first droneSweepFrac of the clip, then
+    // holds at the bottom — an audible, deepening descent rather than a
+    // slow drift across the whole runtime.
+    const sweepEnd = now + duration * droneSweepFrac;
     drone.frequency.exponentialRampToValueAtTime(Math.max(1, droneEndHz), sweepEnd);
     drone.frequency.setValueAtTime(Math.max(1, droneEndHz), sweepEnd);
     drone.connect(droneGain);
@@ -449,6 +440,44 @@ class AudioEngine {
       droneGain.gain.setValueAtTime(0, stopNow);
       drone.stop(stopNow + 0.02);
     };
+  }
+
+  /** A single sparse, dissonant stinger — a sharp low-mid hit, not a
+   * musical note — timed to the reveal moment (the freeze/duplicate
+   * appearing). Two close, deliberately-mistuned oscillators beat
+   * against each other for an unpleasant, unresolved clash; a fast
+   * attack and a hard, un-faded stop keep it a jolt rather than a swell. */
+  playRevealStinger() {
+    const ctx = this.ensureContext();
+    const now = ctx.currentTime;
+    const duration = 0.55;
+    const end = now + duration;
+
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(0, now);
+    gain.gain.linearRampToValueAtTime(0.5, now + 0.015);
+    gain.gain.exponentialRampToValueAtTime(0.001, end);
+
+    const shaper = ctx.createWaveShaper();
+    shaper.curve = distortionCurve(18) as Float32Array<ArrayBuffer>;
+    shaper.connect(gain);
+    shaper.connect(this.masterGain!);
+    gain.connect(this.masterGain!);
+
+    const fundamentals = [69, 73]; // a minor second apart — deliberately unresolved
+    for (const freq of fundamentals) {
+      const osc = ctx.createOscillator();
+      osc.type = "sawtooth";
+      osc.frequency.setValueAtTime(freq, now);
+      osc.frequency.exponentialRampToValueAtTime(freq * 0.7, end);
+      osc.connect(shaper);
+      osc.start(now);
+      osc.stop(end + 0.02);
+    }
+
+    // Hard cutoff — no tail.
+    gain.gain.cancelScheduledValues(end);
+    gain.gain.setValueAtTime(0, end);
   }
 }
 

@@ -16,52 +16,64 @@ function randRange(rng: () => number, min: number, max: number) {
 }
 
 export interface CreepyParams {
-  /** How visible the frame's one anomaly reads — kept in a subtle band. */
-  wrongnessIntensity: number;
   droneStartHz: number;
   droneEndHz: number;
+  /** Peak drone loudness relative to the clip's own audio — dreadful,
+   * not cartoonish. */
+  droneGainTarget: number;
+  /** Fraction of the clip duration over which the drone's pitch sweep
+   * completes before holding at droneEndHz. */
+  droneSweepFrac: number;
   /** Video playbackRate — <1 links a slight pitch-down to a slight
    * time-stretch, for free, on the video's own audio. */
   warpRate: number;
-  /** How far in the past (ms) the lagging region's frame is sampled from. */
-  lagMs: number;
-  /** The one region of the frame that moves unnaturally, as fractions of
-   * frame size. */
-  anomalyRegion: { x: number; y: number; w: number; h: number };
-  /** Where in the clip (0..1 of duration) the anomaly window starts. */
-  anomalyStartFrac: number;
-  anomalyDurMs: number;
-  /** How long the held freeze-frame lasts right before the hard cut. */
+
+  /** The shadow figure's anchor point (base of its "feet"), as fractions
+   * of frame size. */
+  figureX: number;
+  figureY: number;
+  figureScale: number;
+  /** How visible it is during the mundane phase — barely there, could be
+   * mistaken for background clutter. */
+  figureBaseOpacity: number;
+  /** How visible it is once revealed at the freeze — unmistakable. */
+  figureRevealOpacity: number;
+  /** How far the duplicated second silhouette sits from the first at the
+   * reveal, as a fraction of frame width. */
+  figureDuplicateOffsetFrac: number;
+
+  /** Where in the clip (0..1 of duration) the motion-loop begins. */
+  loopStartFrac: number;
+  /** How many full sway cycles get replayed verbatim during the loop —
+   * long enough that a careful viewer can catch the repeat. */
+  loopCycles: 2 | 3;
+
+  /** How long the held freeze/reveal lasts right before the hard cut. */
   freezeHoldMs: number;
 }
 
-/** Picks effect parameters within a pre-tuned "creepy zone" — never the
- * most extreme setting, never fully random/unbounded. Same seed always
- * yields the same params; Regenerate just picks a new seed.
- *
- * TEMP (v4 diagnostic pass): wrongnessIntensity and freezeHoldMs are
- * pushed to their most extreme, obvious values instead of the tuned
- * "creepy zone" ranges below (still present but commented out) — real
- * footage testing reported no perceptible anomaly/freeze at all, and the
- * only way to tell a tuning problem from a pipeline problem is to prove
- * each effect fires unmistakably before dialing anything back down.
- * Revert to the commented ranges once that's confirmed. */
+/** Picks effect parameters within a pre-tuned "creepy zone" — dreadful
+ * and unmistakable, never cartoonish, never invisible. Same seed always
+ * yields the same params; Regenerate just picks a new seed. */
 export function pickCreepyParams(seed: number): CreepyParams {
   const rng = mulberry32(seed);
   return {
-    wrongnessIntensity: randRange(rng, 0.9, 1.0), // was randRange(rng, 0.35, 0.6)
-    droneStartHz: randRange(rng, 150, 260),
-    droneEndHz: randRange(rng, 18, 28),
-    warpRate: randRange(rng, 0.94, 0.985),
-    lagMs: randRange(rng, 650, 1300),
-    anomalyRegion: {
-      x: randRange(rng, 0.12, 0.5),
-      y: randRange(rng, 0.12, 0.5),
-      w: randRange(rng, 0.24, 0.36),
-      h: randRange(rng, 0.24, 0.36),
-    },
-    anomalyStartFrac: randRange(rng, 0.5, 0.66),
-    anomalyDurMs: randRange(rng, 1400, 2200),
-    freezeHoldMs: randRange(rng, 1800, 2000), // was randRange(rng, 420, 680)
+    droneStartHz: randRange(rng, 150, 240),
+    droneEndHz: randRange(rng, 20, 30),
+    droneGainTarget: randRange(rng, 0.35, 0.45),
+    droneSweepFrac: randRange(rng, 0.5, 0.7),
+    warpRate: randRange(rng, 0.9, 0.96),
+
+    figureX: randRange(rng, 0.42, 0.58),
+    figureY: randRange(rng, 0.68, 0.8),
+    figureScale: randRange(rng, 0.85, 1.15),
+    figureBaseOpacity: randRange(rng, 0.08, 0.16),
+    figureRevealOpacity: randRange(rng, 0.85, 0.95),
+    figureDuplicateOffsetFrac: randRange(rng, 0.12, 0.22),
+
+    loopStartFrac: randRange(rng, 0.32, 0.46),
+    loopCycles: rng() < 0.5 ? 2 : 3,
+
+    freezeHoldMs: randRange(rng, 1000, 1400),
   };
 }
