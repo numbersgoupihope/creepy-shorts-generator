@@ -60,8 +60,24 @@ export default function VideoStage({
 
   useEffect(() => {
     if (playToken === 0) return;
-    startClip();
+    const video = videoRef.current;
+    if (!video) return;
+    let cancelled = false;
+
+    // videoUrl can change on every Generate click (a fresh random clip),
+    // so wait for its metadata (duration, dimensions) to actually load
+    // before reading video.duration in startClip() — otherwise the very
+    // first play of a newly-picked clip would race a still-loading src.
+    function onLoaded() {
+      video!.removeEventListener("loadedmetadata", onLoaded);
+      if (!cancelled) startClip();
+    }
+    video.addEventListener("loadedmetadata", onLoaded);
+    video.load();
+
     return () => {
+      cancelled = true;
+      video.removeEventListener("loadedmetadata", onLoaded);
       if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
       stopAudioRef.current?.();
     };
@@ -232,13 +248,19 @@ export default function VideoStage({
 
   return (
     <div style={{ position: "relative" }}>
+      {/* Never display:none or visibility:hidden here — several browsers
+          throttle or stop decoding new video frames for an element that
+          isn't in the paint tree, which would leave drawImage() copying
+          the same stale frame forever (audio would keep playing fine,
+          masking the bug). Off-screen + zero-opacity keeps it decoding
+          while staying invisible to the viewer. */}
       <video
         ref={videoRef}
         src={videoUrl}
         onLoadedMetadata={handleLoadedMetadata}
         muted={false}
         playsInline
-        style={{ display: "none" }}
+        style={{ position: "fixed", top: 0, left: 0, width: 2, height: 2, opacity: 0, pointerEvents: "none" }}
       />
       <canvas
         ref={canvasRef}
