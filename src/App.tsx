@@ -10,16 +10,15 @@ const DURATION_MS: Record<DurationChoice, number> = {
   long: 15000,
 };
 
-// Bundled placeholder footage — plain, ordinary scenes with no built-in
-// wrongness of their own, so the effects pipeline supplies the one
-// anomaly. Real stock footage would drop in here the same way; these are
-// small procedurally-rendered stand-ins (see scripts/generate-clips.mjs)
-// since this project has no path to licensed stock footage.
+// Bundled footage — plain, ordinary scenes with no built-in wrongness of
+// their own, so the effects pipeline supplies the one anomaly. Clip
+// lengths vary (5.5s-15s); VideoStage clamps the chosen duration bucket
+// to whatever the picked clip can actually support.
 const CLIPS = [
   { id: "hallway", src: "/clips/hallway.webm" },
   { id: "room-corner", src: "/clips/room-corner.webm" },
-  { id: "light-fixture", src: "/clips/light-fixture.webm" },
-  { id: "window", src: "/clips/window.webm" },
+  { id: "corridor", src: "/clips/corridor.webm" },
+  { id: "garage-corridor", src: "/clips/garage-corridor.webm" },
 ];
 
 export default function App() {

@@ -1,13 +1,14 @@
-// Regenerates the bundled placeholder clips in public/clips/ — plain,
-// ordinary procedurally-rendered scenes (a hallway, a room corner, a
-// light fixture, a window) with no built-in wrongness of their own, so
-// the effects pipeline supplies the one anomaly.
+// FALLBACK GENERATOR — not currently used. public/clips/ is now populated
+// with real trimmed footage (hallway.mp4, room-corner.mp4, corridor.mp4,
+// garage-corridor.mp4), not these placeholders.
 //
-// These are NOT real stock footage: this project has no path to
-// licensed video assets, so each clip is rendered by drawing to a
-// <canvas> in a real browser and capturing it with MediaRecorder. Swap
-// in real licensed clips at the same paths whenever they're available —
-// nothing else in the app needs to change.
+// This script draws plain, ordinary procedural scenes (a hallway, a room
+// corner, a light fixture, a window) to a <canvas> in a real browser and
+// captures them with MediaRecorder, writing scene-name.webm files. Keep
+// it around for whoever needs stand-in clips when no real footage is
+// available yet — it writes different filenames/extensions than the
+// real clips above, so running it won't overwrite them, but src/App.tsx's
+// CLIPS list would need updating to actually use its output.
 //
 // Run: node scripts/generate-clips.mjs
 

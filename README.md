@@ -27,11 +27,20 @@ Audio (`src/lib/audio.ts`'s `playVideoClip()`):
 
 ## Bundled clips
 
-`public/clips/` ships 4 short (~4.5s) plain, ordinary scenes — a hallway, a room corner, a light fixture, a window — with no built-in wrongness of their own, so the effects pipeline supplies the one anomaly. **These are not real stock footage.** This project has no path to licensed video assets, so each clip is a small procedurally-rendered stand-in (plain shapes/gradients drawn to a canvas and captured with MediaRecorder — see `scripts/generate-clips.mjs`, runnable via `npm run generate-clips`). Swap in real licensed clips at the same paths/filenames whenever they're available; nothing else in the app needs to change. Uploading your own video instead of picking from the bundled set is a reasonable stretch goal but isn't implemented — it's optional, not required to use the tool.
+`public/clips/` ships 4 real, plain, ordinary scenes with no built-in wrongness of their own, so the effects pipeline supplies the one anomaly — trimmed and downscaled (960px wide, h264/mp4) from real footage:
+
+- `hallway.mp4` (5.5s)
+- `room-corner.mp4` (6.5s)
+- `corridor.mp4` (15s)
+- `garage-corridor.mp4` (9.8s)
+
+Lengths vary because they're trimmed from whatever each source clip actually offered rather than padded/looped to a fixed length — this is also why Medium/Long only become meaningful once a longer clip (corridor or garage-corridor) gets picked; on the two short clips they just clamp down to the clip's own length (see Duration below).
+
+`scripts/generate-clips.mjs` is a fallback: it procedurally renders plain placeholder scenes to different filenames (not used by default — see the script's header) for whenever no real footage is on hand. Uploading your own video instead of picking from the bundled set is a reasonable stretch goal but isn't implemented — it's optional, not required to use the tool.
 
 ## Human-facing controls (no raw parameters)
 
-- **Duration** — Short (~5s) / Medium (~10s) / Long (~15s) buttons. Actual clip length is clamped to whatever the picked clip can support.
+- **Duration** — Short (~5s) / Medium (~10s) / Long (~15s) buttons. Actual clip length is clamped to whatever the picked clip can support (see Bundled clips above).
 - **Generate clip / Regenerate** — one button. Each click picks a random bundled clip AND derives a fresh set of effect parameters (anomaly region/timing, drone pitch, wrongness intensity, warp amount, freeze length) from a new random seed, landing them inside a pre-tuned "creepy zone" (`src/lib/random.ts`'s `pickCreepyParams()`) — never maxed out, never fully unbounded. Same seed always reproduces the same params; only the seed (and clip pick) is random per click.
 
 There are no sliders in the UI. The underlying parameters still exist in code (see `random.ts`), just randomized within a tight internal range instead of exposed — tune the ranges there after watching a few outputs.
